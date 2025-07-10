@@ -1822,10 +1822,8 @@ export class AgentLoop {
       instructions,
     );
 
-    // Disable tools for coherestaging provider as it doesn't support them properly
-    const isCoherestaging =
-      this.config.provider?.toLowerCase() === "coherestaging";
-    const tools = isCoherestaging ? [] : this.convertToCohereV2Tools();
+    // Convert tools to V2 format
+    const tools = this.convertToCohereV2Tools();
 
     log(
       `Cohere V2 API call - model: ${this.model}, messages: ${JSON.stringify(cohereMessages)}, tools: ${JSON.stringify(tools)}`,
@@ -2247,14 +2245,18 @@ export class AgentLoop {
   private convertCohereResponseToStream(response: {
     finish_reason?: string;
     text?: string;
-    toolPlan?: string;
-    toolCalls?: Array<{
-      id: string;
-      function: {
-        name: string;
-        arguments: unknown;
-      };
-    }>;
+    message?: {
+      toolPlan?: string;
+      toolCalls?: Array<{
+        id: string;
+        type?: string;
+        function: {
+          name: string;
+          arguments: string;
+        };
+      }>;
+      content?: Array<{ text?: string }>;
+    };
     error?: string;
   }): {
     output?: Array<{
@@ -2271,7 +2273,7 @@ export class AgentLoop {
     log(`Full Cohere response object: ${JSON.stringify(response)}`);
 
     // Handle tool plan (Cohere's explanation of what it's about to do)
-    if (response.toolPlan) {
+    if (response.message?.toolPlan) {
       output.push({
         type: "message",
         id: `msg_plan_${Date.now()}`,
@@ -2280,30 +2282,27 @@ export class AgentLoop {
         content: [
           {
             type: "output_text",
-            text: response.toolPlan,
+            text: response.message.toolPlan,
             annotations: [],
           },
         ],
       });
     }
 
-    // Handle tool calls
-    if (response.toolCalls && response.toolCalls.length > 0) {
-      for (const toolCall of response.toolCalls) {
-        // Convert tool arguments to the expected format
-        const args: Record<string, unknown> = {};
-        if (
-          toolCall.function.arguments &&
-          typeof toolCall.function.arguments === "object"
-        ) {
-          Object.assign(args, toolCall.function.arguments);
+    // Handle tool calls - V2 format has them in message.toolCalls
+    if (response.message?.toolCalls && response.message.toolCalls.length > 0) {
+      for (const toolCall of response.message.toolCalls) {
+        // In V2, arguments are already a JSON string
+        let args = toolCall.function.arguments;
+        if (typeof args !== "string") {
+          args = JSON.stringify(args);
         }
 
         output.push({
           type: "function_call",
           id: toolCall.id,
           name: toolCall.function.name,
-          arguments: JSON.stringify(args),
+          arguments: args,
         });
       }
     }
