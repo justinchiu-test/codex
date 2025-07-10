@@ -338,21 +338,25 @@ export class AgentLoop {
 
     // Initialize Cohere client for cohere providers
     if (this.config.provider?.toLowerCase().includes("cohere")) {
+      log(`Initializing Cohere client for provider: ${this.config.provider}`);
       // For staging environment, use different configuration
       if (this.config.provider?.toLowerCase().includes("staging")) {
         // Remove /compatibility/v1 suffix for native SDK
         const nativeBaseURL =
           baseURL?.replace("/compatibility/v1", "") ||
           "https://stg.api.cohere.ai";
+        log(`Using Cohere staging environment: ${nativeBaseURL}`);
         this.cohere = new CohereClientV2({
           token: apiKey,
           environment: nativeBaseURL, // Use staging endpoint without compatibility layer
         });
       } else {
+        log(`Using default Cohere environment`);
         this.cohere = new CohereClientV2({
           token: apiKey,
         });
       }
+      log(`Cohere client initialized: ${this.cohere ? "yes" : "no"}`);
     }
 
     if (this.provider.toLowerCase() === "azure") {
@@ -469,22 +473,75 @@ export class AgentLoop {
     // TODO: allow arbitrary function calls (beyond shell/container.exec)
     if (name === "container.exec" || name === "shell") {
       // Convert string command to array format if needed
-      let commandArgs = args;
-      if (typeof args.command === "string") {
+      let commandArgs = { ...args }; // Create a copy to avoid mutations
+      log(
+        `handleFunctionCall command conversion - original args: ${JSON.stringify(args)}`,
+      );
+
+      // Handle both 'command' and 'cmd' fields
+      const commandValue = args.command || args.cmd;
+
+      if (typeof commandValue === "string") {
         // For Cohere compatibility, convert string command to array
         // Use shell to handle complex commands properly
         commandArgs = {
           ...args,
-          cmd: ["sh", "-c", args.command],
+          cmd: ["sh", "-c", commandValue],
         };
         delete commandArgs.command;
-      } else if (Array.isArray(args.command)) {
-        // Already in array format, just rename to cmd
+        log(
+          `handleFunctionCall command conversion - converted string to array: ${JSON.stringify(commandArgs)}`,
+        );
+      } else if (Array.isArray(commandValue)) {
+        // Check if this is a single-element array containing a command string
+        // This happens when Cohere sends {"command": "echo hello"} and parseToolCallArguments
+        // converts it to ["echo hello"] instead of properly splitting it
+        if (commandValue.length === 1 && typeof commandValue[0] === "string") {
+          // For single-element arrays, always use shell to handle the command
+          // This ensures commands like "echo hello" and "ls" both work correctly
+          commandArgs = {
+            ...args,
+            cmd: ["sh", "-c", commandValue[0]],
+          };
+          delete commandArgs.command;
+          log(
+            `handleFunctionCall command conversion - converted single-element array to shell: ${JSON.stringify(commandArgs)}`,
+          );
+        } else {
+          // Already in proper array format, ensure it's in cmd field
+          commandArgs = {
+            ...args,
+            cmd: commandValue,
+          };
+          delete commandArgs.command;
+          log(
+            `handleFunctionCall command conversion - kept array format: ${JSON.stringify(commandArgs)}`,
+          );
+        }
+      } else if (!commandValue) {
+        // If no command or cmd field, log error
+        log(
+          `handleFunctionCall command conversion - ERROR: no command or cmd field found in args`,
+        );
         commandArgs = {
           ...args,
-          cmd: args.command,
+          cmd: ["echo", "ERROR: No command provided"],
         };
-        delete commandArgs.command;
+      }
+
+      // Ensure we have a valid cmd array
+      if (!commandArgs.cmd || !Array.isArray(commandArgs.cmd)) {
+        log(
+          `handleFunctionCall ERROR: commandArgs.cmd is not an array: ${JSON.stringify(commandArgs)}`,
+        );
+        outputItem.output = JSON.stringify({
+          output: "",
+          metadata: {
+            exit_code: 1,
+            error: "Invalid command format - cmd must be an array",
+          },
+        });
+        return [outputItem];
       }
 
       const {
@@ -857,13 +914,18 @@ export class AgentLoop {
             const _apiCallStart = Date.now();
 
             // Use Cohere SDK for Cohere providers
+            log(
+              `Provider check: ${this.config.provider}, Cohere client exists: ${!!this.cohere}`,
+            );
             if (
               this.config.provider?.toLowerCase().includes("cohere") &&
               this.cohere
             ) {
+              log(`Using native Cohere V2 API`);
               // eslint-disable-next-line no-await-in-loop
               stream = await this.callCohereAPI(turnInput, mergedInstructions);
             } else {
+              log(`Using OpenAI compatibility API`);
               const useStreaming = !this.config.provider
                 ?.toLowerCase()
                 .includes("cohere");
@@ -1831,11 +1893,16 @@ export class AgentLoop {
     );
 
     try {
-      const chatParams = {
+      const chatParams: Record<string, unknown> = {
         model: this.model,
         messages: cohereMessages,
-        tools: tools.length > 0 ? tools : undefined,
       };
+
+      // Only add tools if not disabled and tools are available
+      // Some Cohere models may not support tools
+      if (tools.length > 0 && !process.env.COHERE_DISABLE_TOOLS) {
+        chatParams.tools = tools;
+      }
 
       log(`Cohere chat params: ${JSON.stringify(chatParams)}`);
 

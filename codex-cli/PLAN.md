@@ -328,50 +328,56 @@ Not all Cohere models support tools. Known working models:
 
 #### 422 UnprocessableEntity Error in Interactive Mode
 
-If you get a 422 error when using Cohere in interactive mode:
+If you get a 422 error "your request resulted in an invalid tool generation":
 
-1. **Check the tool parameter format** - Cohere may require simpler parameter schemas:
+1. **Model Compatibility** - Not all Cohere models support tools. The error often means:
+   - The specific model doesn't support tool/function calling
+   - The model is still in development and tools aren't enabled yet
+   - Try using `command-r` or `command-r-plus` with the production provider
+2. **Disable tools temporarily** - You can disable tools for testing:
+
+   ```bash
+   export COHERE_DISABLE_TOOLS=1
+   node dist/cli.js -m c3-sweep-ecsydrkq-690h-fp16 --provider coherestaging "Hello"
+   ```
+
+3. **Tool format for V2** - Cohere V2 uses OpenAI-compatible format:
 
    ```typescript
-   // Instead of complex array schema:
-   command: {
-     type: "array",
-     items: { type: "string" }
-   }
-
-   // Use simple string:
-   command: {
-     type: "string",
-     description: "The command to execute"
+   {
+     type: "function",
+     function: {
+       name: "shell",
+       description: "Runs a shell command",
+       parameters: {
+         type: "object",
+         properties: {
+           command: {
+             type: "string",
+             description: "The command to execute"
+           }
+         },
+         required: ["command"]
+       }
+     }
    }
    ```
 
-2. **Handle string commands properly** - Convert string commands to shell format:
-
-   ```typescript
-   if (typeof args.command === "string") {
-     commandArgs = {
-       ...args,
-       cmd: ["sh", "-c", args.command], // Use shell to handle complex commands
-     };
-   }
-   ```
-
-3. **Check logs for details** - The logs are in `$TMPDIR/oai-codex/`:
+4. **Check logs for details** - The logs are in `$TMPDIR/oai-codex/`:
 
    ```bash
    tail -f $TMPDIR/oai-codex/codex-cli-latest.log
    ```
 
-4. **Verify the exact error** - Add detailed logging to see what request is failing:
-   ```typescript
-   if (err.status === 422) {
-     log(`422 Error - Request that failed:`);
-     log(`Model: ${this.model}`);
-     log(`Messages: ${JSON.stringify(cohereMessages, null, 2)}`);
-     log(`Tools: ${JSON.stringify(tools, null, 2)}`);
-   }
-   ```
+   Look for:
+
+   - "Using native Cohere V2 API" to confirm V2 is being used
+   - "Cohere chat params" to see the exact request
+   - Error details with the 422 response
+
+5. **Known working models**:
+   - `command-r` and `command-r-plus` (with production provider)
+   - Some experimental models (like c3-sweep-\*) may not support tools yet
 
 #### ESLint Errors
 

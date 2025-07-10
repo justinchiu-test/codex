@@ -82,7 +82,11 @@ export async function handleExecCommand(
   ) => Promise<CommandConfirmation>,
   abortSignal?: AbortSignal,
 ): Promise<HandleExecCommandResult> {
+  log(`handleExecCommand received args: ${JSON.stringify(args)}`);
   const { cmd: command, workdir } = args;
+  log(
+    `handleExecCommand extracted cmd: ${JSON.stringify(command)}, workdir: ${workdir}`,
+  );
 
   const key = deriveCommandKey(command);
 
