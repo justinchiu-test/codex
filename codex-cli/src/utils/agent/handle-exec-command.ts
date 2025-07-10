@@ -233,10 +233,16 @@ async function execCommand(
     }
   }
 
+  // Create a new execInput with the corrected workdir
+  const correctedExecInput = {
+    ...execInput,
+    workdir: workdir,
+  };
+
   if (applyPatchCommand != null) {
     log("EXEC running apply_patch command");
   } else if (isLoggingEnabled()) {
-    const { cmd, timeoutInMillis } = execInput;
+    const { cmd, timeoutInMillis } = correctedExecInput;
     // Seconds are a bit easier to read in log messages and most timeouts
     // are specified as multiples of 1000, anyway.
     const timeout =
@@ -246,7 +252,7 @@ async function execCommand(
     log(
       `EXEC running \`${formatCommandForDisplay(
         cmd,
-      )}\` in workdir=${workdir} with timeout=${timeout}s`,
+      )}\` in workdir=${correctedExecInput.workdir} with timeout=${timeout}s`,
     );
   }
 
@@ -258,7 +264,7 @@ async function execCommand(
     applyPatchCommand != null
       ? execApplyPatch(applyPatchCommand.patch, workdir)
       : await exec(
-          { ...execInput, additionalWritableRoots },
+          { ...correctedExecInput, additionalWritableRoots },
           await getSandbox(runInSandbox),
           config,
           abortSignal,

@@ -84,6 +84,9 @@ export function exec(
     detached: true,
   };
 
+  log(
+    `raw-exec: spawning command: prog="${prog}", args=${JSON.stringify(adaptedCommand.slice(1))}, cwd=${fullOptions.cwd || "default"}`,
+  );
   const child: ChildProcess = spawn(prog, adaptedCommand.slice(1), fullOptions);
   // If an AbortSignal is provided, ensure the spawned process is terminated
   // when the signal is triggered so that cancellations propagate down to any
@@ -197,6 +200,9 @@ export function exec(
     });
 
     child.on("error", (err) => {
+      log(
+        `raw-exec: child process error: ${err.message}, code: ${(err as NodeJS.ErrnoException).code}, syscall: ${(err as NodeJS.ErrnoException).syscall}, path: ${(err as NodeJS.ErrnoException).path}`,
+      );
       const execResult = {
         stdout: "",
         stderr: String(err),

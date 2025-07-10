@@ -484,9 +484,10 @@ export class AgentLoop {
       if (typeof commandValue === "string") {
         // For Cohere compatibility, convert string command to array
         // Use shell to handle complex commands properly
+        // Use /bin/sh for better portability
         commandArgs = {
           ...args,
-          cmd: ["sh", "-c", commandValue],
+          cmd: ["/bin/sh", "-c", commandValue],
         };
         delete commandArgs.command;
         log(
@@ -497,16 +498,34 @@ export class AgentLoop {
         // This happens when Cohere sends {"command": "echo hello"} and parseToolCallArguments
         // converts it to ["echo hello"] instead of properly splitting it
         if (commandValue.length === 1 && typeof commandValue[0] === "string") {
-          // For single-element arrays, always use shell to handle the command
-          // This ensures commands like "echo hello" and "ls" both work correctly
-          commandArgs = {
-            ...args,
-            cmd: ["sh", "-c", commandValue[0]],
-          };
+          // Special case for simple commands without arguments
+          const singleCommand = commandValue[0];
+          if (
+            singleCommand === "ls" ||
+            singleCommand === "pwd" ||
+            singleCommand === "date"
+          ) {
+            // These commands can be executed directly without shell
+            commandArgs = {
+              ...args,
+              cmd: [`/bin/${singleCommand}`],
+            };
+            log(
+              `handleFunctionCall command conversion - simple command executed directly: ${JSON.stringify(commandArgs)}`,
+            );
+          } else {
+            // For other single-element arrays, use shell to handle the command
+            // This ensures commands like "echo hello" work correctly
+            // Use /bin/sh for better portability
+            commandArgs = {
+              ...args,
+              cmd: ["/bin/sh", "-c", singleCommand],
+            };
+            log(
+              `handleFunctionCall command conversion - converted single-element array to shell: ${JSON.stringify(commandArgs)}`,
+            );
+          }
           delete commandArgs.command;
-          log(
-            `handleFunctionCall command conversion - converted single-element array to shell: ${JSON.stringify(commandArgs)}`,
-          );
         } else {
           // Already in proper array format, ensure it's in cmd field
           commandArgs = {
