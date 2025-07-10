@@ -472,9 +472,10 @@ export class AgentLoop {
       let commandArgs = args;
       if (typeof args.command === "string") {
         // For Cohere compatibility, convert string command to array
+        // Use shell to handle complex commands properly
         commandArgs = {
           ...args,
-          cmd: args.command.split(" "),
+          cmd: ["sh", "-c", args.command],
         };
         delete commandArgs.command;
       } else if (Array.isArray(args.command)) {
@@ -1867,6 +1868,14 @@ export class AgentLoop {
       log(`Error status: ${err.status}`);
       log(`Error body: ${JSON.stringify(err.body)}`);
 
+      // For 422 errors, log the exact request that failed
+      if (err.status === 422) {
+        log(`422 Error - Request that failed:`);
+        log(`Model: ${this.model}`);
+        log(`Messages: ${JSON.stringify(cohereMessages, null, 2)}`);
+        log(`Tools: ${JSON.stringify(tools, null, 2)}`);
+      }
+
       // Check if this is the specific tools error
       if (
         err.status === 422 &&
@@ -2362,6 +2371,7 @@ export class AgentLoop {
     };
   }> {
     // Convert the shell tool to Cohere V2 format
+    // Use simplified format based on cohere-typescript examples
     return [
       {
         type: "function",
@@ -2372,24 +2382,15 @@ export class AgentLoop {
             type: "object",
             properties: {
               command: {
-                type: "array",
-                items: {
-                  type: "string",
-                },
-                description: "The command to execute as an array of strings",
+                type: "string",
+                description: "The command to execute",
               },
               workdir: {
                 type: "string",
                 description: "The working directory for the command.",
               },
-              timeout: {
-                type: "number",
-                description:
-                  "The maximum time to wait for the command to complete in milliseconds.",
-              },
             },
             required: ["command"],
-            additionalProperties: false,
           },
         },
       },

@@ -326,6 +326,53 @@ Not all Cohere models support tools. Known working models:
 3. Check response parsing for `message.toolCalls`
 4. Enable debug logging to see raw API responses
 
+#### 422 UnprocessableEntity Error in Interactive Mode
+
+If you get a 422 error when using Cohere in interactive mode:
+
+1. **Check the tool parameter format** - Cohere may require simpler parameter schemas:
+
+   ```typescript
+   // Instead of complex array schema:
+   command: {
+     type: "array",
+     items: { type: "string" }
+   }
+
+   // Use simple string:
+   command: {
+     type: "string",
+     description: "The command to execute"
+   }
+   ```
+
+2. **Handle string commands properly** - Convert string commands to shell format:
+
+   ```typescript
+   if (typeof args.command === "string") {
+     commandArgs = {
+       ...args,
+       cmd: ["sh", "-c", args.command], // Use shell to handle complex commands
+     };
+   }
+   ```
+
+3. **Check logs for details** - The logs are in `$TMPDIR/oai-codex/`:
+
+   ```bash
+   tail -f $TMPDIR/oai-codex/codex-cli-latest.log
+   ```
+
+4. **Verify the exact error** - Add detailed logging to see what request is failing:
+   ```typescript
+   if (err.status === 422) {
+     log(`422 Error - Request that failed:`);
+     log(`Model: ${this.model}`);
+     log(`Messages: ${JSON.stringify(cohereMessages, null, 2)}`);
+     log(`Tools: ${JSON.stringify(tools, null, 2)}`);
+   }
+   ```
+
 #### ESLint Errors
 
 Run `npm run lint` and fix:
