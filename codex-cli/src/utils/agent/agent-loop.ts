@@ -468,12 +468,30 @@ export class AgentLoop {
 
     // TODO: allow arbitrary function calls (beyond shell/container.exec)
     if (name === "container.exec" || name === "shell") {
+      // Convert string command to array format if needed
+      let commandArgs = args;
+      if (typeof args.command === "string") {
+        // For Cohere compatibility, convert string command to array
+        commandArgs = {
+          ...args,
+          cmd: args.command.split(" "),
+        };
+        delete commandArgs.command;
+      } else if (Array.isArray(args.command)) {
+        // Already in array format, just rename to cmd
+        commandArgs = {
+          ...args,
+          cmd: args.command,
+        };
+        delete commandArgs.command;
+      }
+
       const {
         outputText,
         metadata,
         additionalItems: additionalItemsFromExec,
       } = await handleExecCommand(
-        args,
+        commandArgs,
         this.config,
         this.approvalPolicy,
         this.additionalWritableRoots,
@@ -892,28 +910,14 @@ export class AgentLoop {
 
               // Process the response similar to streaming
               if (response.output && response.output.length > 0) {
-                for (const item of response.output) {
-                  this.onItem(item);
-                }
-
-                // Check if there are tool calls that need to be executed
-                const hasToolCalls = response.output.some(
-                  (item) => item.type === "function_call",
+                // Process all events including tool calls
+                // eslint-disable-next-line no-await-in-loop
+                newTurnInput = await this.processEventsWithoutStreaming(
+                  response.output,
+                  (item) => {
+                    this.onItem(item);
+                  },
                 );
-                if (hasToolCalls) {
-                  // Process tool calls and get the results
-                  // eslint-disable-next-line no-await-in-loop
-                  newTurnInput = await this.processEventsWithoutStreaming(
-                    response.output,
-                    (_item) => {
-                      // Don't emit again, we already did above
-                    },
-                  );
-                  // Continue conversation if there are tool results
-                } else {
-                  // No tool calls, end the conversation
-                  newTurnInput = [];
-                }
               } else {
                 // No output, end the conversation
                 newTurnInput = [];
@@ -1812,17 +1816,84 @@ export class AgentLoop {
       throw new Error("Cohere client not initialized");
     }
 
-    // Convert turnInput to Cohere format
-    const messages = this.convertToCohereMessages(turnInput, instructions);
+    // Convert turnInput to Cohere V2 format
+    const cohereMessages = this.convertToCohereV2Messages(
+      turnInput,
+      instructions,
+    );
 
-    const response = await this.cohere.chat({
-      model: this.model,
-      messages: messages,
-      tools: this.convertToCohereTools(),
-    });
+    // Disable tools for coherestaging provider as it doesn't support them properly
+    const isCoherestaging =
+      this.config.provider?.toLowerCase() === "coherestaging";
+    const tools = isCoherestaging ? [] : this.convertToCohereV2Tools();
 
-    // Convert Cohere response to OpenAI-like format
-    return this.convertCohereResponseToStream(response);
+    log(
+      `Cohere V2 API call - model: ${this.model}, messages: ${JSON.stringify(cohereMessages)}, tools: ${JSON.stringify(tools)}`,
+    );
+
+    try {
+      const chatParams = {
+        model: this.model,
+        messages: cohereMessages,
+        tools: tools.length > 0 ? tools : undefined,
+      };
+
+      log(`Cohere chat params: ${JSON.stringify(chatParams)}`);
+
+      const response = await this.cohere.chat(chatParams);
+
+      log(`Cohere API response received`);
+      log(`Response finish_reason: ${response.finish_reason}`);
+      log(`Response text: ${response.text}`);
+      log(`Response toolCalls: ${JSON.stringify(response.toolCalls)}`);
+      log(`Full response: ${JSON.stringify(response)}`);
+
+      // Check if this is an error response
+      if (response.finish_reason === "ERROR" || response.error) {
+        throw new Error(
+          `Cohere API error: ${response.error || "Unknown error"}`,
+        );
+      }
+
+      // Convert Cohere response to OpenAI-like format
+      return this.convertCohereResponseToStream(response);
+    } catch (error: unknown) {
+      const err = error as {
+        message?: string;
+        status?: number;
+        body?: unknown;
+      };
+      // Log the full error for debugging
+      log(`Cohere API error details: ${JSON.stringify(error)}`);
+      log(`Error message: ${err.message}`);
+      log(`Error status: ${err.status}`);
+      log(`Error body: ${JSON.stringify(err.body)}`);
+
+      // Check if this is the specific tools error
+      if (
+        err.status === 422 &&
+        (err.message?.includes("invalid tool generation") ||
+          err.body?.message?.includes("invalid tool generation"))
+      ) {
+        log(`Tool format issue detected, falling back to no tools`);
+        // If tools are causing issues, retry without them
+        const chatParamsNoTools = {
+          model: this.model,
+          messages: cohereMessages,
+        };
+
+        log(`Retrying without tools: ${JSON.stringify(chatParamsNoTools)}`);
+
+        const response = await this.cohere.chat(chatParamsNoTools);
+
+        log(`Fallback response received: ${JSON.stringify(response)}`);
+
+        return this.convertCohereResponseToStream(response);
+      }
+
+      // Re-throw other errors
+      throw error;
+    }
   }
 
   private convertToCohereMessages(
@@ -1873,7 +1944,12 @@ export class AgentLoop {
 
         if (content) {
           messages.push({
-            role: item.role === "assistant" ? "assistant" : "user",
+            role:
+              item.role === "assistant"
+                ? "assistant"
+                : item.role === "system"
+                  ? "system"
+                  : "user",
             content: content,
           });
         }
@@ -1905,12 +1981,281 @@ export class AgentLoop {
     return messages;
   }
 
-  private convertCohereResponseToStream(response: {
-    message?: {
-      toolPlan?: string;
-      toolCalls?: Array<{ id: string; name: string; arguments: string }>;
+  private convertToCohereV2Messages(
+    turnInput: Array<ResponseInputItem>,
+    instructions: string,
+  ): Array<{
+    role: string;
+    content?: string;
+    toolCalls?: Array<{
+      id: string;
+      type: string;
+      function: {
+        name: string;
+        arguments: Record<string, unknown>;
+      };
+    }>;
+    toolResults?: Array<{
+      call: {
+        name: string;
+        arguments: Record<string, unknown>;
+      };
+      outputs: Array<Record<string, unknown>>;
+    }>;
+    toolCallId?: string;
+  }> {
+    const messages: Array<{
+      role: string;
+      content?: string;
+      toolCalls?: Array<{
+        id: string;
+        type: string;
+        function: {
+          name: string;
+          arguments: Record<string, unknown>;
+        };
+      }>;
+      toolResults?: Array<{
+        call: {
+          name: string;
+          arguments: Record<string, unknown>;
+        };
+        outputs: Array<Record<string, unknown>>;
+      }>;
+      toolCallId?: string;
+    }> = [];
+
+    // Add system message with instructions
+    if (instructions) {
+      messages.push({
+        role: "system",
+        content: instructions,
+      });
+    }
+
+    // Track pending tool calls for matching with results
+    const pendingToolCalls: Map<
+      string,
+      { name: string; arguments: Record<string, unknown> }
+    > = new Map();
+
+    // Process turn input
+    for (const item of turnInput) {
+      if (item.type === "message") {
+        const content = item.content
+          .filter((c) => c.type === "input_text")
+          .map((c) => (c as { text?: string }).text || "")
+          .join(" ");
+
+        if (content) {
+          messages.push({
+            role:
+              item.role === "assistant"
+                ? "assistant"
+                : item.role === "system"
+                  ? "system"
+                  : "user",
+            content: content,
+          });
+        }
+      } else if (item.type === "function_call") {
+        // Store tool call for later
+        const callId = (item as { id?: string }).id || "";
+        const name = (item as { name?: string }).name || "";
+        const args = (item as { arguments?: string }).arguments || "{}";
+
+        try {
+          const parameters = JSON.parse(args);
+          pendingToolCalls.set(callId, { name, arguments: parameters });
+
+          // Add assistant message with tool call
+          messages.push({
+            role: "assistant",
+            toolCalls: [
+              {
+                id: callId,
+                type: "function",
+                function: {
+                  name: name,
+                  arguments: parameters,
+                },
+              },
+            ],
+          });
+        } catch {
+          log(`Failed to parse tool arguments: ${args}`);
+        }
+      } else if (item.type === "function_call_output") {
+        // Add tool result message
+        const callId = (item as { call_id?: string }).call_id || "";
+        const toolCall = pendingToolCalls.get(callId);
+
+        if (toolCall) {
+          const output = (item as { output?: string }).output || "";
+          try {
+            const parsedOutput = JSON.parse(output);
+            messages.push({
+              role: "tool",
+              toolCallId: callId,
+              content: output,
+              toolResults: [
+                {
+                  call: {
+                    name: toolCall.name,
+                    arguments: toolCall.arguments,
+                  },
+                  outputs: [parsedOutput],
+                },
+              ],
+            });
+          } catch {
+            // If output is not JSON, still include it
+            messages.push({
+              role: "tool",
+              toolCallId: callId,
+              content: output,
+            });
+          }
+          pendingToolCalls.delete(callId);
+        }
+      }
+    }
+
+    return messages;
+  }
+
+  private convertToCohereFormat(
+    turnInput: Array<ResponseInputItem>,
+    _instructions: string,
+  ): {
+    messages: Array<{ role: string; message: string }>;
+    currentMessage: string;
+    toolResults?: Array<{
+      call: {
+        name: string;
+        parameters: Record<string, unknown>;
+      };
+      outputs: Array<Record<string, unknown>>;
+    }>;
+  } {
+    const messages: Array<{ role: string; message: string }> = [];
+    let currentMessage = "";
+    const toolResults: Array<{
+      call: {
+        name: string;
+        parameters: Record<string, unknown>;
+      };
+      outputs: Array<Record<string, unknown>>;
+    }> = [];
+
+    // Track pending tool calls
+    const pendingToolCalls: Map<
+      string,
+      { name: string; parameters: Record<string, unknown> }
+    > = new Map();
+
+    // Process turn input
+    for (let i = 0; i < turnInput.length; i++) {
+      const item = turnInput[i];
+
+      if (item.type === "message") {
+        const content = item.content
+          .filter((c) => c.type === "input_text")
+          .map((c) => (c as { text?: string }).text || "")
+          .join(" ");
+
+        if (content) {
+          if (item.role === "user") {
+            // This is the current user message
+            currentMessage = content;
+          } else if (item.role === "assistant") {
+            messages.push({
+              role: "assistant",
+              message: content,
+            });
+          }
+        }
+      } else if (item.type === "function_call") {
+        // Store tool call for matching with results
+        const callId = (item as { id?: string }).id || "";
+        const name = (item as { name?: string }).name || "";
+        const args = (item as { arguments?: string }).arguments || "{}";
+
+        try {
+          const parameters = JSON.parse(args);
+          pendingToolCalls.set(callId, { name, parameters });
+        } catch {
+          log(`Failed to parse tool arguments: ${args}`);
+        }
+      } else if (item.type === "function_call_output") {
+        // Match tool result with its call
+        const callId = (item as { call_id?: string }).call_id || "";
+        const toolCall = pendingToolCalls.get(callId);
+
+        if (toolCall) {
+          const output = (item as { output?: string }).output || "";
+          try {
+            const parsedOutput = JSON.parse(output);
+            // Cohere expects outputs as an array of objects
+            toolResults.push({
+              call: {
+                name: toolCall.name,
+                parameters: toolCall.parameters,
+              },
+              outputs: [parsedOutput], // Wrap single object in array
+            });
+          } catch {
+            // If output is not JSON, wrap it as a simple object
+            toolResults.push({
+              call: {
+                name: toolCall.name,
+                parameters: toolCall.parameters,
+              },
+              outputs: [{ output: output }],
+            });
+          }
+          pendingToolCalls.delete(callId);
+        }
+      }
+    }
+
+    // If no current message was found, default to empty
+    if (!currentMessage && turnInput.length > 0) {
+      // Look for the last user message
+      for (let i = turnInput.length - 1; i >= 0; i--) {
+        const item = turnInput[i];
+        if (item.type === "message" && item.role === "user") {
+          const content = item.content
+            .filter((c) => c.type === "input_text")
+            .map((c) => (c as { text?: string }).text || "")
+            .join(" ");
+          if (content) {
+            currentMessage = content;
+            break;
+          }
+        }
+      }
+    }
+
+    return {
+      messages,
+      currentMessage: currentMessage || "Continue",
+      toolResults: toolResults.length > 0 ? toolResults : undefined,
     };
-    message?: { content?: Array<{ text?: string }> };
+  }
+
+  private convertCohereResponseToStream(response: {
+    finish_reason?: string;
+    text?: string;
+    toolPlan?: string;
+    toolCalls?: Array<{
+      id: string;
+      function: {
+        name: string;
+        arguments: unknown;
+      };
+    }>;
+    error?: string;
   }): {
     output?: Array<{
       type: string;
@@ -1922,8 +2267,11 @@ export class AgentLoop {
   } {
     const output = [];
 
+    // Log the full response to understand its structure
+    log(`Full Cohere response object: ${JSON.stringify(response)}`);
+
     // Handle tool plan (Cohere's explanation of what it's about to do)
-    if (response.message?.toolPlan) {
+    if (response.toolPlan) {
       output.push({
         type: "message",
         id: `msg_plan_${Date.now()}`,
@@ -1932,7 +2280,7 @@ export class AgentLoop {
         content: [
           {
             type: "output_text",
-            text: response.message.toolPlan,
+            text: response.toolPlan,
             annotations: [],
           },
         ],
@@ -1940,36 +2288,50 @@ export class AgentLoop {
     }
 
     // Handle tool calls
-    if (response.message?.toolCalls && response.message.toolCalls.length > 0) {
-      for (const toolCall of response.message.toolCalls) {
+    if (response.toolCalls && response.toolCalls.length > 0) {
+      for (const toolCall of response.toolCalls) {
+        // Convert tool arguments to the expected format
+        const args: Record<string, unknown> = {};
+        if (
+          toolCall.function.arguments &&
+          typeof toolCall.function.arguments === "object"
+        ) {
+          Object.assign(args, toolCall.function.arguments);
+        }
+
         output.push({
           type: "function_call",
           id: toolCall.id,
           name: toolCall.function.name,
-          arguments: toolCall.function.arguments,
+          arguments: JSON.stringify(args),
         });
       }
     }
 
-    // Handle regular text content
-    if (response.text || response.message?.content) {
-      const text = response.text || response.message?.content?.[0]?.text || "";
+    // Handle regular text content - check multiple possible fields
+    const text =
+      response.text ||
+      response.message?.content?.[0]?.text ||
+      response.content ||
+      response.reply ||
+      "";
 
-      if (text) {
-        output.push({
-          type: "message",
-          id: `msg_${Date.now()}`,
-          status: "completed",
-          role: "assistant",
-          content: [
-            {
-              type: "output_text",
-              text: text,
-              annotations: [],
-            },
-          ],
-        });
-      }
+    log(`Extracted text from response: "${text}"`);
+
+    if (text) {
+      output.push({
+        type: "message",
+        id: `msg_${Date.now()}`,
+        status: "completed",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: text,
+            annotations: [],
+          },
+        ],
+      });
     }
 
     // If no content, add empty message
@@ -1990,6 +2352,49 @@ export class AgentLoop {
     }
 
     return { output };
+  }
+
+  private convertToCohereV2Tools(): Array<{
+    type: string;
+    function: {
+      name: string;
+      description: string;
+      parameters?: Record<string, unknown>;
+    };
+  }> {
+    // Convert the shell tool to Cohere V2 format
+    return [
+      {
+        type: "function",
+        function: {
+          name: "shell",
+          description: "Runs a shell command, and returns its output.",
+          parameters: {
+            type: "object",
+            properties: {
+              command: {
+                type: "array",
+                items: {
+                  type: "string",
+                },
+                description: "The command to execute as an array of strings",
+              },
+              workdir: {
+                type: "string",
+                description: "The working directory for the command.",
+              },
+              timeout: {
+                type: "number",
+                description:
+                  "The maximum time to wait for the command to complete in milliseconds.",
+              },
+            },
+            required: ["command"],
+            additionalProperties: false,
+          },
+        },
+      },
+    ];
   }
 
   private convertToCohereTools(): Array<{
@@ -2015,11 +2420,8 @@ export class AgentLoop {
             type: "object",
             properties: {
               command: {
-                type: "array",
-                items: {
-                  type: "string",
-                },
-                description: "The command to execute as an array of strings",
+                type: "string",
+                description: "The command to execute",
               },
               workdir: {
                 type: "string",
