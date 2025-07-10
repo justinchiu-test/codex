@@ -31,6 +31,7 @@ import {
 } from "../session.js";
 import { applyPatchToolInstructions } from "./apply-patch.js";
 import { handleExecCommand } from "./handle-exec-command.js";
+import { CohereClientV2 } from "cohere-ai";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -129,6 +130,7 @@ export class AgentLoop {
   // the OpenAI SDK types may not perfectly match. The `typeof OpenAI` pattern captures the
   // instance shape without resorting to `any`.
   private oai: OpenAI;
+  private cohere?: CohereClientV2;
 
   private onItem: (item: ResponseItem) => void;
   private onLoading: (loading: boolean) => void;
@@ -326,10 +328,32 @@ export class AgentLoop {
           ? { "OpenAI-Organization": OPENAI_ORGANIZATION }
           : {}),
         ...(OPENAI_PROJECT ? { "OpenAI-Project": OPENAI_PROJECT } : {}),
+        ...(this.config.provider?.toLowerCase().includes("cohere")
+          ? { "Cohere-Version": "2022-12-06" }
+          : {}),
       },
       httpAgent: PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined,
       ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
     });
+
+    // Initialize Cohere client for cohere providers
+    if (this.config.provider?.toLowerCase().includes("cohere")) {
+      // For staging environment, use different configuration
+      if (this.config.provider?.toLowerCase().includes("staging")) {
+        // Remove /compatibility/v1 suffix for native SDK
+        const nativeBaseURL =
+          baseURL?.replace("/compatibility/v1", "") ||
+          "https://stg.api.cohere.ai";
+        this.cohere = new CohereClientV2({
+          token: apiKey,
+          environment: nativeBaseURL, // Use staging endpoint without compatibility layer
+        });
+      } else {
+        this.cohere = new CohereClientV2({
+          token: apiKey,
+        });
+      }
+    }
 
     if (this.provider.toLowerCase() === "azure") {
       this.oai = new AzureOpenAI({
@@ -705,8 +729,7 @@ export class AgentLoop {
             if (this.disableResponseStorage) {
               // Exclude system messages from transcript as they do not form
               // part of the assistant/user dialogue that the model needs.
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const role = (item as any).role;
+              const role = (item as { role?: string }).role;
               if (role !== "system") {
                 // Clone the item to avoid mutating the object that is also
                 // rendered in the UI. We need to strip auxiliary metadata
@@ -728,8 +751,7 @@ export class AgentLoop {
                   //@ts-expect-error - waiting on sdk
                   (item as ResponseInputItem).type === "local_shell_call" ||
                   ((item as ResponseInputItem).type === "message" &&
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    (item as any).role === "user")
+                    (item as { role?: string }).role === "user")
                 ) {
                   return;
                 }
@@ -740,8 +762,7 @@ export class AgentLoop {
                 // The `duration_ms` field is only added to reasoning items to
                 // show elapsed time in the UI. It must not be forwarded back
                 // to the server.
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                delete (clone as any).duration_ms;
+                delete (clone as { duration_ms?: number }).duration_ms;
 
                 this.transcript.push(clone);
               }
@@ -781,6 +802,7 @@ export class AgentLoop {
         const MAX_RETRIES = 8;
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
           try {
+            let newTurnInput: Array<ResponseInputItem> = [];
             let reasoning: Reasoning | undefined;
             let modelSpecificInstructions: string | undefined;
             if (this.model.startsWith("o") || this.model.startsWith("codex")) {
@@ -813,28 +835,123 @@ export class AgentLoop {
               `instructions (length ${mergedInstructions.length}): ${mergedInstructions}`,
             );
 
-            // eslint-disable-next-line no-await-in-loop
-            stream = await responseCall({
-              model: this.model,
-              instructions: mergedInstructions,
-              input: turnInput,
-              stream: true,
-              parallel_tool_calls: false,
-              reasoning,
-              ...(this.config.flexMode ? { service_tier: "flex" } : {}),
-              ...(this.disableResponseStorage
-                ? { store: false }
-                : {
-                    store: true,
-                    previous_response_id: lastResponseId || undefined,
-                  }),
-              tools: tools,
-              // Explicitly tell the model it is allowed to pick whatever
-              // tool it deems appropriate.  Omitting this sometimes leads to
-              // the model ignoring the available tools and responding with
-              // plain text instead (resulting in a missing tool‑call).
-              tool_choice: "auto",
-            });
+            const _apiCallStart = Date.now();
+
+            // Use Cohere SDK for Cohere providers
+            if (
+              this.config.provider?.toLowerCase().includes("cohere") &&
+              this.cohere
+            ) {
+              // eslint-disable-next-line no-await-in-loop
+              stream = await this.callCohereAPI(turnInput, mergedInstructions);
+            } else {
+              const useStreaming = !this.config.provider
+                ?.toLowerCase()
+                .includes("cohere");
+              // eslint-disable-next-line no-await-in-loop
+              stream = await responseCall({
+                model: this.model,
+                instructions: mergedInstructions,
+                input: turnInput,
+                stream: useStreaming,
+                parallel_tool_calls: false,
+                reasoning,
+                ...(this.config.flexMode ? { service_tier: "flex" } : {}),
+                ...(this.disableResponseStorage
+                  ? { store: false }
+                  : {
+                      store: true,
+                      previous_response_id: lastResponseId || undefined,
+                    }),
+                tools: tools,
+                // Explicitly tell the model it is allowed to pick whatever
+                // tool it deems appropriate.  Omitting this sometimes leads to
+                // the model ignoring the available tools and responding with
+                // plain text instead (resulting in a missing tool‑call).
+                tool_choice: "auto",
+              });
+            }
+
+            // Handle Cohere native SDK response
+            if (
+              this.config.provider?.toLowerCase().includes("cohere") &&
+              this.cohere
+            ) {
+              const response = stream as {
+                output?: Array<{
+                  type: string;
+                  id?: string;
+                  name?: string;
+                  arguments?: string;
+                  content?: Array<{ type: string; text?: string }>;
+                }>;
+              };
+
+              // Mark that we've processed Cohere response
+              stream = undefined;
+
+              // Process the response similar to streaming
+              if (response.output && response.output.length > 0) {
+                for (const item of response.output) {
+                  this.onItem(item);
+                }
+
+                // Check if there are tool calls that need to be executed
+                const hasToolCalls = response.output.some(
+                  (item) => item.type === "function_call",
+                );
+                if (hasToolCalls) {
+                  // Process tool calls and get the results
+                  // eslint-disable-next-line no-await-in-loop
+                  newTurnInput = await this.processEventsWithoutStreaming(
+                    response.output,
+                    (_item) => {
+                      // Don't emit again, we already did above
+                    },
+                  );
+                  // Continue conversation if there are tool results
+                } else {
+                  // No tool calls, end the conversation
+                  newTurnInput = [];
+                }
+              } else {
+                // No output, end the conversation
+                newTurnInput = [];
+              }
+
+              // Update turnInput before breaking
+              turnInput = newTurnInput;
+              break;
+            }
+
+            // Handle non-streaming response for other providers
+            if (
+              !this.config.provider?.toLowerCase().includes("cohere") &&
+              !useStreaming
+            ) {
+              // Convert single response to stream-like events
+              const response = stream as {
+                output?: Array<{
+                  type: string;
+                  id?: string;
+                  name?: string;
+                  arguments?: string;
+                  content?: Array<{ type: string; text?: string }>;
+                }>;
+              };
+
+              // Process the response similar to streaming
+              if (response.output && response.output.length > 0) {
+                for (const item of response.output) {
+                  this.onItem(item);
+                }
+              }
+
+              // End the loop for non-streaming
+              turnInput = [];
+              break;
+            }
+
             break;
           } catch (error) {
             const isTimeout = error instanceof APIConnectionTimeoutError;
@@ -842,15 +959,17 @@ export class AgentLoop {
             // accommodate the test environment's minimal OpenAI mocks which
             // do not define the class.  Falling back to `false` when the
             // export is absent ensures the check never throws.
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const ApiConnErrCtor = (OpenAI as any).APIConnectionError as  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              | (new (...args: any) => Error)
+            const ApiConnErrCtor = (
+              OpenAI as {
+                APIConnectionError?: new (...args: Array<unknown>) => Error;
+              }
+            ).APIConnectionError as
+              | (new (...args: Array<unknown>) => Error)
               | undefined;
             const isConnectionError = ApiConnErrCtor
               ? error instanceof ApiConnErrCtor
               : false;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const errCtx = error as any;
+            const errCtx = error as { status?: number; code?: string };
             const status =
               errCtx?.status ?? errCtx?.httpStatus ?? errCtx?.statusCode;
             // Treat classical 5xx *and* explicit OpenAI `server_error` types
@@ -1033,10 +1152,10 @@ export class AgentLoop {
         // eslint-disable-next-line no-constant-condition
         while (true) {
           try {
-            let newTurnInput: Array<ResponseInputItem> = [];
-
+            let _eventCount = 0;
             // eslint-disable-next-line no-await-in-loop
             for await (const event of stream as AsyncIterable<ResponseEvent>) {
+              _eventCount++;
               log(`AgentLoop.run(): response event ${event.type}`);
 
               // process and surface each item (no-op until we can depend on streaming events)
@@ -1580,6 +1699,46 @@ export class AgentLoop {
         // eslint-disable-next-line no-await-in-loop
         const result = await this.handleFunctionCall(item);
         turnInput.push(...result);
+
+        // Emit the tool output to display it to the user
+        for (const outputItem of result) {
+          if (outputItem.type === "function_call_output") {
+            // Parse the output JSON to extract the actual command output
+            try {
+              const parsedOutput = JSON.parse(outputItem.output);
+              if (parsedOutput.output) {
+                emitItem({
+                  id: `tool_output_${Date.now()}`,
+                  type: "message",
+                  role: "system",
+                  status: "completed",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: `Command output:\n${parsedOutput.output}`,
+                      annotations: [],
+                    },
+                  ],
+                } as ResponseItem);
+              }
+            } catch (e) {
+              // If parsing fails, emit the raw output
+              emitItem({
+                id: `tool_output_${Date.now()}`,
+                type: "message",
+                role: "system",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: `Tool output: ${outputItem.output}`,
+                    annotations: [],
+                  },
+                ],
+              } as ResponseItem);
+            }
+          }
+        }
         //@ts-expect-error - waiting on sdk
       } else if (item.type === "local_shell_call") {
         //@ts-expect-error - waiting on sdk
@@ -1591,10 +1750,293 @@ export class AgentLoop {
         // eslint-disable-next-line no-await-in-loop
         const result = await this.handleLocalShellCall(item);
         turnInput.push(...result);
+
+        // Emit the tool output to display it to the user
+        for (const outputItem of result) {
+          if (outputItem.type === "local_shell_call_output") {
+            // Parse the output JSON to extract the actual command output
+            try {
+              const parsedOutput = JSON.parse(outputItem.output);
+              if (parsedOutput.output) {
+                emitItem({
+                  id: `tool_output_${Date.now()}`,
+                  type: "message",
+                  role: "system",
+                  status: "completed",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: `Command output:\n${parsedOutput.output}`,
+                      annotations: [],
+                    },
+                  ],
+                } as ResponseItem);
+              }
+            } catch (e) {
+              // If parsing fails, emit the raw output
+              emitItem({
+                id: `tool_output_${Date.now()}`,
+                type: "message",
+                role: "system",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: `Tool output: ${outputItem.output}`,
+                    annotations: [],
+                  },
+                ],
+              } as ResponseItem);
+            }
+          }
+        }
       }
       emitItem(item as ResponseItem);
     }
     return turnInput;
+  }
+
+  private async callCohereAPI(
+    turnInput: Array<ResponseInputItem>,
+    instructions: string,
+  ): Promise<{
+    output?: Array<{
+      type: string;
+      id?: string;
+      name?: string;
+      arguments?: string;
+      content?: Array<{ type: string; text?: string }>;
+    }>;
+  }> {
+    if (!this.cohere) {
+      throw new Error("Cohere client not initialized");
+    }
+
+    // Convert turnInput to Cohere format
+    const messages = this.convertToCohereMessages(turnInput, instructions);
+
+    const response = await this.cohere.chat({
+      model: this.model,
+      messages: messages,
+      tools: this.convertToCohereTools(),
+    });
+
+    // Convert Cohere response to OpenAI-like format
+    return this.convertCohereResponseToStream(response);
+  }
+
+  private convertToCohereMessages(
+    turnInput: Array<ResponseInputItem>,
+    instructions: string,
+  ): Array<{
+    role: string;
+    content?: string;
+    tool_calls?: Array<{
+      id: string;
+      type: string;
+      function: {
+        name: string;
+        arguments: string;
+      };
+    }>;
+    tool_call_id?: string;
+  }> {
+    const messages: Array<{
+      role: string;
+      content?: string;
+      tool_calls?: Array<{
+        id: string;
+        type: string;
+        function: {
+          name: string;
+          arguments: string;
+        };
+      }>;
+      tool_call_id?: string;
+    }> = [];
+
+    // Add system message with instructions
+    if (instructions) {
+      messages.push({
+        role: "system",
+        content: instructions,
+      });
+    }
+
+    // Convert turn input to messages
+    for (const item of turnInput) {
+      if (item.type === "message") {
+        const content = item.content
+          .filter((c) => c.type === "input_text")
+          .map((c) => (c as { text?: string }).text || "")
+          .join(" ");
+
+        if (content) {
+          messages.push({
+            role: item.role === "assistant" ? "assistant" : "user",
+            content: content,
+          });
+        }
+      } else if (item.type === "function_call") {
+        // Add assistant message with tool calls for Cohere format
+        messages.push({
+          role: "assistant",
+          tool_calls: [
+            {
+              id: (item as { id?: string }).id || "",
+              type: "function",
+              function: {
+                name: (item as { name?: string }).name || "",
+                arguments: (item as { arguments?: string }).arguments || "",
+              },
+            },
+          ],
+        });
+      } else if (item.type === "function_call_output") {
+        // Add tool result message
+        messages.push({
+          role: "tool",
+          tool_call_id: (item as { call_id?: string }).call_id || "",
+          content: (item as { output?: string }).output || "",
+        });
+      }
+    }
+
+    return messages;
+  }
+
+  private convertCohereResponseToStream(response: {
+    message?: {
+      toolPlan?: string;
+      toolCalls?: Array<{ id: string; name: string; arguments: string }>;
+    };
+    message?: { content?: Array<{ text?: string }> };
+  }): {
+    output?: Array<{
+      type: string;
+      id?: string;
+      name?: string;
+      arguments?: string;
+      content?: Array<{ type: string; text?: string }>;
+    }>;
+  } {
+    const output = [];
+
+    // Handle tool plan (Cohere's explanation of what it's about to do)
+    if (response.message?.toolPlan) {
+      output.push({
+        type: "message",
+        id: `msg_plan_${Date.now()}`,
+        status: "completed",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: response.message.toolPlan,
+            annotations: [],
+          },
+        ],
+      });
+    }
+
+    // Handle tool calls
+    if (response.message?.toolCalls && response.message.toolCalls.length > 0) {
+      for (const toolCall of response.message.toolCalls) {
+        output.push({
+          type: "function_call",
+          id: toolCall.id,
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments,
+        });
+      }
+    }
+
+    // Handle regular text content
+    if (response.text || response.message?.content) {
+      const text = response.text || response.message?.content?.[0]?.text || "";
+
+      if (text) {
+        output.push({
+          type: "message",
+          id: `msg_${Date.now()}`,
+          status: "completed",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: text,
+              annotations: [],
+            },
+          ],
+        });
+      }
+    }
+
+    // If no content, add empty message
+    if (output.length === 0) {
+      output.push({
+        type: "message",
+        id: `msg_${Date.now()}`,
+        status: "completed",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: "",
+            annotations: [],
+          },
+        ],
+      });
+    }
+
+    return { output };
+  }
+
+  private convertToCohereTools(): Array<{
+    type: string;
+    function: {
+      name: string;
+      description: string;
+      parameters: {
+        type: string;
+        properties: Record<string, unknown>;
+        required?: Array<string>;
+      };
+    };
+  }> {
+    // Convert the shell tool to Cohere format
+    return [
+      {
+        type: "function",
+        function: {
+          name: "shell",
+          description: "Runs a shell command, and returns its output.",
+          parameters: {
+            type: "object",
+            properties: {
+              command: {
+                type: "array",
+                items: {
+                  type: "string",
+                },
+                description: "The command to execute as an array of strings",
+              },
+              workdir: {
+                type: "string",
+                description: "The working directory for the command.",
+              },
+              timeout: {
+                type: "number",
+                description:
+                  "The maximum time to wait for the command to complete in milliseconds.",
+              },
+            },
+            required: ["command"],
+            additionalProperties: false,
+          },
+        },
+      },
+    ];
   }
 }
 

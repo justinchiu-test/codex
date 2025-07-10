@@ -29,6 +29,7 @@
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
     "chalk": "^5.2.0",
+    "cohere-ai": "^7.17.1",
     "diff": "^7.0.0",
     "dotenv": "^16.1.4",
     "express": "^5.1.0",

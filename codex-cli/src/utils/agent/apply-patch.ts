@@ -744,7 +744,10 @@ function remove_file(p: string): void {
 // CLI mode. Not exported, executed only if run directly.
 // -----------------------------------------------------------------------------
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (
+  import.meta.url === `file://${process.argv[1]}` &&
+  process.argv[1]?.endsWith("apply-patch.js")
+) {
   let patchText = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => (patchText += chunk));

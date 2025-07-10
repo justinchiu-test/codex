@@ -52,4 +52,14 @@ export const providers: Record<
     baseURL: "https://conductor.arcee.ai/v1",
     envKey: "ARCEEAI_API_KEY",
   },
+  cohere: {
+    name: "Cohere",
+    baseURL: "https://api.cohere.ai/compatibility/v1",
+    envKey: "COHERE_API_KEY",
+  },
+  coherestaging: {
+    name: "Cohere Staging",
+    baseURL: "https://stg.api.cohere.ai/compatibility/v1",
+    envKey: "CO_API_KEY_STAGING",
+  },
 };

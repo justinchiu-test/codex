@@ -565,13 +565,20 @@ if (cli.flags.quiet) {
         ? AutoApprovalMode.AUTO_EDIT
         : config.approvalMode || AutoApprovalMode.SUGGEST;
 
-  await runQuietMode({
-    prompt,
-    imagePaths: imagePaths || [],
-    approvalPolicy: quietApprovalPolicy,
-    additionalWritableRoots,
-    config,
-  });
+  try {
+    await runQuietMode({
+      prompt,
+      imagePaths: imagePaths || [],
+      approvalPolicy: quietApprovalPolicy,
+      additionalWritableRoots,
+      config,
+    });
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error("Error in quiet mode:", error);
+    onExit();
+    process.exit(1);
+  }
   onExit();
   process.exit(0);
 }
