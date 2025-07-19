@@ -130,6 +130,16 @@ pub struct Config {
     /// If not "none", the value to use for `reasoning.summary` when making a
     /// request using the Responses API.
     pub model_reasoning_summary: ReasoningSummary,
+
+    /// When set to `true`, overrides the default heuristic and forces
+    /// `model_supports_reasoning_summaries()` to return `true`.
+    pub model_supports_reasoning_summaries: bool,
+
+    /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
+    pub chatgpt_base_url: String,
+
+    /// Experimental rollout resume path (absolute path to .jsonl; undocumented).
+    pub experimental_resume: Option<PathBuf>,
 }
 
 impl Config {
@@ -308,6 +318,15 @@ pub struct ConfigToml {
 
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,
+
+    /// Override to force-enable reasoning summaries for the configured model.
+    pub model_supports_reasoning_summaries: Option<bool>,
+
+    /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
+    pub chatgpt_base_url: Option<String>,
+
+    /// Experimental rollout resume path (absolute path to .jsonl; undocumented).
+    pub experimental_resume: Option<PathBuf>,
 }
 
 impl ConfigToml {
@@ -435,6 +454,9 @@ impl Config {
                 .as_ref()
                 .map(|info| info.max_output_tokens)
         });
+
+        let experimental_resume = cfg.experimental_resume;
+
         let config = Self {
             model,
             model_context_window,
@@ -472,6 +494,17 @@ impl Config {
                 .model_reasoning_summary
                 .or(cfg.model_reasoning_summary)
                 .unwrap_or_default(),
+
+            model_supports_reasoning_summaries: cfg
+                .model_supports_reasoning_summaries
+                .unwrap_or(false),
+
+            chatgpt_base_url: config_profile
+                .chatgpt_base_url
+                .or(cfg.chatgpt_base_url)
+                .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+
+            experimental_resume,
         };
         Ok(config)
     }
@@ -660,6 +693,9 @@ name = "OpenAI using Chat Completions"
 base_url = "https://api.openai.com/v1"
 env_key = "OPENAI_API_KEY"
 wire_api = "chat"
+request_max_retries = 4            # retry failed HTTP requests
+stream_max_retries = 10            # retry dropped SSE streams
+stream_idle_timeout_ms = 300000    # 5m idle timeout
 
 [profiles.o3]
 model = "o3"
@@ -700,6 +736,9 @@ disable_response_storage = true
             query_params: None,
             http_headers: None,
             env_http_headers: None,
+            request_max_retries: Some(4),
+            stream_max_retries: Some(10),
+            stream_idle_timeout_ms: Some(300_000),
         };
         let model_provider_map = {
             let mut model_provider_map = built_in_model_providers();
@@ -776,6 +815,9 @@ disable_response_storage = true
                 hide_agent_reasoning: false,
                 model_reasoning_effort: ReasoningEffort::High,
                 model_reasoning_summary: ReasoningSummary::Detailed,
+                model_supports_reasoning_summaries: false,
+                chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
+                experimental_resume: None,
             },
             o3_profile_config
         );
@@ -820,6 +862,9 @@ disable_response_storage = true
             hide_agent_reasoning: false,
             model_reasoning_effort: ReasoningEffort::default(),
             model_reasoning_summary: ReasoningSummary::default(),
+            model_supports_reasoning_summaries: false,
+            chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
+            experimental_resume: None,
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -879,6 +924,9 @@ disable_response_storage = true
             hide_agent_reasoning: false,
             model_reasoning_effort: ReasoningEffort::default(),
             model_reasoning_summary: ReasoningSummary::default(),
+            model_supports_reasoning_summaries: false,
+            chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
+            experimental_resume: None,
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);

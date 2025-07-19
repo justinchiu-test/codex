@@ -82,6 +82,15 @@ impl BottomPane<'_> {
         }
     }
 
+    pub fn handle_paste(&mut self, pasted: String) {
+        if self.active_view.is_none() {
+            let needs_redraw = self.composer.handle_paste(pasted);
+            if needs_redraw {
+                self.request_redraw();
+            }
+        }
+    }
+
     /// Update the status indicator text (only when the `StatusIndicatorView` is
     /// active).
     pub(crate) fn update_status_text(&mut self, text: String) {
@@ -153,6 +162,10 @@ impl BottomPane<'_> {
         }
     }
 
+    pub(crate) fn composer_is_empty(&self) -> bool {
+        self.composer.is_empty()
+    }
+
     pub(crate) fn is_task_running(&self) -> bool {
         self.is_task_running
     }
@@ -199,7 +212,7 @@ impl BottomPane<'_> {
     }
 
     pub(crate) fn request_redraw(&self) {
-        self.app_event_tx.send(AppEvent::Redraw)
+        self.app_event_tx.send(AppEvent::RequestRedraw)
     }
 
     /// Returns true when a popup inside the composer is visible.
