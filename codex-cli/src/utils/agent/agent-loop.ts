@@ -1789,40 +1789,8 @@ export class AgentLoop {
         // Emit the tool output to display it to the user
         for (const outputItem of result) {
           if (outputItem.type === "function_call_output") {
-            // Parse the output JSON to extract the actual command output
-            try {
-              const parsedOutput = JSON.parse(outputItem.output);
-              if (parsedOutput.output) {
-                emitItem({
-                  id: `tool_output_${Date.now()}`,
-                  type: "message",
-                  role: "system",
-                  status: "completed",
-                  content: [
-                    {
-                      type: "output_text",
-                      text: `Command output:\n${parsedOutput.output}`,
-                      annotations: [],
-                    },
-                  ],
-                } as ResponseItem);
-              }
-            } catch (e) {
-              // If parsing fails, emit the raw output
-              emitItem({
-                id: `tool_output_${Date.now()}`,
-                type: "message",
-                role: "system",
-                status: "completed",
-                content: [
-                  {
-                    type: "output_text",
-                    text: `Tool output: ${outputItem.output}`,
-                    annotations: [],
-                  },
-                ],
-              } as ResponseItem);
-            }
+            // Emit the function call output directly so it gets the proper formatting
+            emitItem(outputItem as ResponseItem);
           }
         }
         //@ts-expect-error - waiting on sdk
@@ -1840,40 +1808,8 @@ export class AgentLoop {
         // Emit the tool output to display it to the user
         for (const outputItem of result) {
           if (outputItem.type === "local_shell_call_output") {
-            // Parse the output JSON to extract the actual command output
-            try {
-              const parsedOutput = JSON.parse(outputItem.output);
-              if (parsedOutput.output) {
-                emitItem({
-                  id: `tool_output_${Date.now()}`,
-                  type: "message",
-                  role: "system",
-                  status: "completed",
-                  content: [
-                    {
-                      type: "output_text",
-                      text: `Command output:\n${parsedOutput.output}`,
-                      annotations: [],
-                    },
-                  ],
-                } as ResponseItem);
-              }
-            } catch (e) {
-              // If parsing fails, emit the raw output
-              emitItem({
-                id: `tool_output_${Date.now()}`,
-                type: "message",
-                role: "system",
-                status: "completed",
-                content: [
-                  {
-                    type: "output_text",
-                    text: `Tool output: ${outputItem.output}`,
-                    annotations: [],
-                  },
-                ],
-              } as ResponseItem);
-            }
+            // Emit the local shell call output directly so it gets the proper formatting
+            emitItem(outputItem as ResponseItem);
           }
         }
       }
