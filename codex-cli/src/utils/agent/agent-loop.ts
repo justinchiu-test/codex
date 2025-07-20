@@ -1782,6 +1782,10 @@ export class AgentLoop {
           continue;
         }
         alreadyProcessedResponses.add(item.id);
+
+        // Emit the function call BEFORE execution so it shows "$ command" first
+        emitItem(item as ResponseItem);
+
         // eslint-disable-next-line no-await-in-loop
         const result = await this.handleFunctionCall(item);
         turnInput.push(...result);
@@ -1801,6 +1805,10 @@ export class AgentLoop {
         }
         //@ts-expect-error - waiting on sdk
         alreadyProcessedResponses.add(item.id);
+
+        // Emit the local shell call BEFORE execution
+        emitItem(item as ResponseItem);
+
         // eslint-disable-next-line no-await-in-loop
         const result = await this.handleLocalShellCall(item);
         turnInput.push(...result);
@@ -1812,8 +1820,10 @@ export class AgentLoop {
             emitItem(outputItem as ResponseItem);
           }
         }
+      } else {
+        // For other items (like messages), emit them
+        emitItem(item as ResponseItem);
       }
-      emitItem(item as ResponseItem);
     }
     return turnInput;
   }
